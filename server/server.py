@@ -14,14 +14,14 @@ from PIL import Image
 from ultralytics import YOLO
 import torch
 
-# Fix for PyTorch 2.6+ weights_only security change
+# Correção para a mudança de segurança weights_only do PyTorch 2.6+
 import torch.serialization
 torch.load = lambda *args, **kwargs: torch.serialization.load(*args, **kwargs, weights_only=False)
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 import utils
 
-# Load env variables
+# Carregar variáveis de ambiente
 load_dotenv()
 DEBUG = os.getenv("DEBUG") == "True"
 WS_PORT = int(os.getenv("WS_PORT"))
@@ -43,7 +43,7 @@ NUMBER_OF_VALIDATION_ROUNDS = int(os.getenv("NUMBER_OF_VALIDATION_ROUNDS"))
 NUMBER_OF_OCCURRENCES_TO_BE_VALID = int(os.getenv("NUMBER_OF_OCCURRENCES_TO_BE_VALID"))
 SKIP_BEFORE_Y_MAX = float(os.getenv("SKIP_BEFORE_Y_MAX"))
 
-# Initialize global static variables
+# Inicializar variáveis estáticas globais
 PURE_YOLO_MODEL = YOLO(PURE_YOLO_MODEL_PATH)
 LICENSE_PLATE_YOLO_MODEL = YOLO(LICENSE_PLATE_YOLO_MODEL_PATH)
 CAR_RELATED_LABELS = [
@@ -58,7 +58,7 @@ CAR_RELATED_LABELS = [
 def _print(string):
     if DEBUG: print(string)
 
-############ Web socket server ############
+############ Servidor Web Socket ############
 CONNECTED_SOCKETS = []
 async def handle_connection(websocket, path):
     global CONNECTED_SOCKETS
@@ -73,33 +73,33 @@ async def run_websocket_server():
     server = await websockets.serve(handle_connection, "", WS_PORT)
     await server.wait_closed()
 
-############ Video capture ############
+############ Captura de Vídeo ############
 LATEST_FRAME = None
 def run_video_capture():
     global LATEST_FRAME
     while True:
         capture = cv2.VideoCapture(RTSP_CAPTURE_CONFIG)
         if capture.isOpened() is False:
-            _print(f"Unable to connect to video capture: {RTSP_CAPTURE_CONFIG}. Will try again after 5 seconds...")
+            _print(f"Não foi possível conectar à captura de vídeo: {RTSP_CAPTURE_CONFIG}. Tentando novamente em 5 segundos...")
             LATEST_FRAME = None
             time.sleep(5)
             continue
         
-        _print(f"Video capture opened successfully: {RTSP_CAPTURE_CONFIG}")
+        _print(f"Captura de vídeo aberta com sucesso: {RTSP_CAPTURE_CONFIG}")
 
         while(capture.isOpened()):
             able_to_read_frame, frame = capture.read()
             if able_to_read_frame is False:
-                _print("End of video or could not read frame, restarting...")
+                _print("Fim do vídeo ou não foi possível ler o quadro, reiniciando...")
                 LATEST_FRAME = None
                 break
 
-            # LATEST_FRAME is updated here
+            # LATEST_FRAME é atualizado aqui
             LATEST_FRAME = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).astype(np.uint8))
             
-            # On macOS, GUI must be in main thread. Since this runs in a thread, 
-            # we disable cv2.imshow here to avoid hanging/crashing.
-            # If you want to see the video, use a direct player or fix thread logic.
+            # No macOS, a GUI deve estar na thread principal. Como isso roda em uma thread,
+            # desativamos o cv2.imshow aqui para evitar travamentos/quedas.
+            # Se quiser ver o vídeo, use um player direto ou corrija a lógica de threads.
             # if DEBUG:
             #     cv2.startWindowThread()
             #     cv2.namedWindow("frame")
@@ -108,12 +108,12 @@ def run_video_capture():
 
         capture.release()
 
-############ Detection ############
-# [(Image, Image, str)] => array of (car image, license plate image, license plate as string)
+############ Detecção ############
+# [(Image, Image, str)] => array de (imagem do carro, imagem da placa, placa como string)
 def detect_license_plates_from_frame(captured_frame: Image) -> [(Image, Image, str)]:
     number_of_yolo_boxes, yolo_boxes = utils.detect_with_yolo(PURE_YOLO_MODEL, captured_frame, DEBUG)
     if number_of_yolo_boxes == 0:
-        _print("No images of cars found")
+        _print("Nenhuma imagem de carro encontrada")
         return []
 
     license_plates_recognized = []
@@ -123,13 +123,13 @@ def detect_license_plates_from_frame(captured_frame: Image) -> [(Image, Image, s
             PURE_YOLO_MODEL.names[int(car_box.cls)]
         )
         if box_label not in CAR_RELATED_LABELS:
-            _print(f"Found label \"{box_label}\", however it's not in CAR_RELATED_LABELS, skipping")
+            _print(f"Rótulo encontrado \"{box_label}\", porém não está em CAR_RELATED_LABELS, pulando")
             continue
 
         x_min, y_min, x_max, y_max = car_box.xyxy.cpu().detach().numpy()[0]
-        _print(f"Car found at coordinates: {x_min}, {y_min}, {x_max}, {y_max}")
+        _print(f"Carro encontrado nas coordenadas: {x_min}, {y_min}, {x_max}, {y_max}")
         if y_max < SKIP_BEFORE_Y_MAX:
-            _print(f"Found car, however it's too far \"{y_max}\" (req \"{SKIP_BEFORE_Y_MAX}\"), skipping")
+            _print(f"Carro encontrado, porém está muito longe \"{y_max}\" (necessário \"{SKIP_BEFORE_Y_MAX}\"), pulando")
             continue
 
         car_image = captured_frame.crop((x_min, y_min, x_max, y_max))
@@ -143,19 +143,19 @@ def detect_license_plates_from_frame(captured_frame: Image) -> [(Image, Image, s
         for (j, license_plate_box) in enumerate(license_plates_as_boxes):
             license_plate_image, license_plate_as_string = utils.read_license_plate(f"{i}_{j}", license_plate_box, car_image, 500, 20, DEBUG, SHOULD_TRY_LP_CROP, MINIMUM_NUMBER_OF_CHARS_FOR_MATCH)
             if license_plate_as_string == "":
-                _print(f"Car {i} ; Result {j}, unable to find any characters of detected license plate")
+                _print(f"Carro {i} ; Resultado {j}, não foi possível encontrar caracteres na placa detectada")
                 continue
             if len(license_plate_as_string) < MINIMUM_NUMBER_OF_CHARS_FOR_MATCH:
-                _print(f"Found license plate {license_plate_as_string}, but it's shorter than {MINIMUM_NUMBER_OF_CHARS_FOR_MATCH}")
+                _print(f"Placa encontrada {license_plate_as_string}, mas é menor que {MINIMUM_NUMBER_OF_CHARS_FOR_MATCH}")
                 continue
 
             _print(y_max)
-            _print(f"Found license plate {license_plate_as_string}")
+            _print(f"Placa encontrada {license_plate_as_string}")
             license_plates_recognized.append((car_image, license_plate_image, license_plate_as_string))
 
     return license_plates_recognized
 
-# any => Image (it cannot be used as type)
+# any => Image (não pode ser usado como tipo)
 def validate_results_between_rounds(recognitions_between_rounds: list[list[(any, any, str)]], number_of_occurrences_to_be_valid: int):
     license_plate_counts = {}
     for recognitions in recognitions_between_rounds:
@@ -185,9 +185,9 @@ async def run_detection():
     recognitions_between_rounds = []
     license_plates_sent_history = []
     while True:
-        await asyncio.sleep(0.01) # Checkup on websocket server task
+        await asyncio.sleep(0.01) # Verificação na tarefa do servidor websocket
         if LATEST_FRAME is None:
-            _print("LATEST_FRAME is None, nothing to do, sleeping for 1 second...")
+            _print("LATEST_FRAME é None, nada a fazer, dormindo por 1 segundo...")
             time.sleep(1)
             continue
 

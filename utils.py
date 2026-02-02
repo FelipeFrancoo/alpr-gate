@@ -12,7 +12,7 @@ from datetime import datetime
 from skimage.filters import threshold_local
 from ultralytics import YOLO
 
-# Returns number of results + results as boxes
+# Retorna o número de resultados + resultados como caixas (boxes)
 def detect_with_yolo(preloaded_model: YOLO, car_image: Image, verbose: bool) -> (int, any):
     result = preloaded_model.predict(car_image, verbose=verbose)[0]
     return (len(result.boxes), result.boxes)
@@ -58,7 +58,7 @@ def get_letter_rectangles_from_contours(iwl):
 def gen_intermediate_file_name(filename: str, file_type: str, unique_identifier: str):
     return f"./intermediate_detection_files/{filename}_{unique_identifier}.{file_type}"
 
-# This function should be called right after getting license plate boxes
+# Esta função deve ser chamada logo após obter as caixas das placas
 def prepare_env_for_reading_license_plates(should_save_intermediate_files: bool):
     try:
         if should_save_intermediate_files:
@@ -67,30 +67,30 @@ def prepare_env_for_reading_license_plates(should_save_intermediate_files: bool)
             os.mkdir("./intermediate_detection_files/")
     except: pass
 
-# Read single license plate box
-# Returns license plate as string
+# Ler caixa de uma única placa
+# Retorna a placa como string
 def read_license_plate(unique_identifier: str, box: any, original_image: Image, width_boost: int, additional_white_spacing_each_side: int, debug: bool, should_try_lp_crop: bool, minimum_number_of_chars_for_match: int) -> (Image, str):
-    # Crop image
+    # Cortar imagem
     x_min, y_min, x_max, y_max = box.xyxy.cpu().detach().numpy()[0]
     original_width = x_max - x_min
     original_height = y_max - y_min
     boost_multiplier = width_boost / original_width
     boosted_width = int(original_width * boost_multiplier)
     boosted_height = int(original_height * boost_multiplier)
-    license_plate_cropped_img = original_image.crop(  # crop to license plate
+    license_plate_cropped_img = original_image.crop(  # cortar para a placa
         (x_min, y_min, x_max, y_max)
-    ).convert( # black and white images make preprocessing more effective
+    ).convert( # imagens em preto e branco tornam o pré-processamento mais eficaz
         "L"
-    ).resize( # resizing makes recognition more effective
+    ).resize( # redimensionar torna o reconhecimento mais eficaz
         [boosted_width, boosted_height]
     )
     if should_try_lp_crop:
-        # crop from left and right, because license plate recognition matches with overflow
+        # cortar das laterais esquerda e direita, pois o reconhecimento de placa combina com overflow
         license_plate_cropped_img = license_plate_cropped_img.crop(((45, 0, boosted_width - 20, boosted_height)))
     if debug:
         license_plate_cropped_img.save(gen_intermediate_file_name("cropped_license_plate_full", "jpg", unique_identifier))
         
-    # Pre-process the image
+    # Pré-processar a imagem
     license_plate_cropped_img_as_np_array = cv2.cvtColor(np.array(license_plate_cropped_img), cv2.COLOR_GRAY2BGR)
     iwl_bb = clean_plate_into_contours(license_plate_cropped_img_as_np_array, width_boost)
     iwl_wb = cv2.bitwise_not(iwl_bb)
@@ -98,11 +98,11 @@ def read_license_plate(unique_identifier: str, box: any, original_image: Image, 
         cv2.imwrite(gen_intermediate_file_name("iwl_bb", "jpg", unique_identifier), iwl_bb, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
         cv2.imwrite(gen_intermediate_file_name("iwl_wb", "jpg", unique_identifier), iwl_wb, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
         
-    # Get each letter
+    # Obter cada letra
     letter_rectangles = get_letter_rectangles_from_contours(iwl_wb)
     iwl_wb_pil = Image.fromarray(iwl_wb, mode="L")
     
-    # No reason to try reading, if there aren't even enought rectagles (skips reading which improves performance)
+    # Sem motivo para tentar ler se não houver retângulos suficientes (pula a leitura para melhorar a performance)
     if len(letter_rectangles) < minimum_number_of_chars_for_match:
         return (license_plate_cropped_img, "")
     
