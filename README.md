@@ -1,32 +1,61 @@
-# Main Gate ALPR
+# ALPR Gate - Sistema de Reconhecimento de Placas
 
-- [Showcase](#showcase)
-- [How does it work?](#how-does-it-work)
-- [How to setup](#how-to-setup)
-  - [Prerequisites](#prerequisites)
-  - [Start the websocket and matching server](#start-the-websocket-and-matching-server)
-  - [Start the example client (optional)](#start-the-example-client-optional)
-  - [Train your own model (optional)](#train-your-own-model-optional)
-  - [Test your/provided models visually (optional)](#test-yourprovided-models-visually-optional)
-  - [How to configure env](#how-to-configure-env)
-    - [Base (change behavior in a noticable way)](#base-change-behavior-in-a-noticable-way)
-    - [Custom tweaks (tinkering with these can become a silent problem if you don't know what you're doing)](#custom-tweaks-tinkering-with-these-can-become-a-silent-problem-if-you-dont-know-what-youre-doing)
-- [Development Notes](#development-notes)
-- [Acknowledgements](#acknowledgements)
-  - [yolov8](#airesourcesyolov8)
-  - [andrewmvd_dataset](#airesourcesandrewmvd_datasetzip)
-  - [aslanahmedov_dataset](#airesourcesaslanahmedov_datasetzip)
-  - [other](#other)
+Sistema de monitoramento e leitura automática de placas de veículos (ALPR) otimizado para o padrão brasileiro (Antigo e Mercosul), com integração PostgreSQL e interface em Rust.
 
-# Showcase
+## 🚀 Funcionalidades
 
-[![Showcase gif](./readme/showcase.gif)](./readme/showcase.mp4)
+- **Reconhecimento Inteligente:** Detecta placas brasileiras via YOLOv8.
+- **Padrão Brasileiro:** Filtro estrito para formatos `AAA-1234` e `AAA1A23`.
+- **Banco de Dados:** Armazenamento em PostgreSQL via Docker.
+- **Interface em Rust:** Cliente leve com visualização em tempo real via WebSockets.
+- **Limpeza Automática:** Remoção de logs e imagens locais após 1 dia.
+- **Otimizado para Mac:** Suporte nativo para chips Apple Silicon (M1/M2/M3).
 
-(btw, the repository contains code and AI models for full reading without censoring. The video(s)/showcase(s)/image(s) are censored because I took data from production and don't want to dox people :D)
+## 🛠️ Como Configurar
 
-# How does it work?
+### Pré-requisitos
+- Python 3.9+
+- Docker & Docker Compose
+- Rust (para o cliente GUI)
 
-This is just a high-level explanation, if you want a more in-depth understanding, read the [env config](#how-to-configure-env) + source code :D
+### 1. Banco de Dados (PostgreSQL)
+```bash
+cd server
+docker-compose up -d
+```
+
+### 2. Servidor (Python)
+```bash
+# Crie e ative o ambiente virtual
+python -m venv .venv
+source .venv/bin/activate
+
+# Instale as dependências
+pip install -r requirements.txt
+
+# Inicie o servidor
+python server/server.py
+```
+
+### 3. Cliente GUI (Rust)
+```bash
+cd client
+cargo run
+```
+
+## ⚙️ Configuração (.env)
+O sistema utiliza um arquivo `.env` na pasta `server/` para:
+- Conexão com o banco (Postgres).
+- URL da câmera RTSP ou caminho do arquivo de vídeo.
+- Parâmetros de confiança da IA.
+
+## 📝 Notas de Desenvolvimento
+- O projeto foi migrado de MSSQL para PostgreSQL para melhor performance e compatibilidade.
+- A detecção ignora automaticamente qualquer texto que não siga o padrão de placas do Brasil.
+- Certifique-se de configurar o caminho do vídeo/câmera no seu arquivo `.env`.
+
+---
+*Desenvolvido para automação de portarias e segurança.*
 
 1. When you start the web server, all env variables and ai models all loaded into memory.
 2. If you enabled result saving, the directory for results will get created
