@@ -1,0 +1,29 @@
+# General
+**/__pycache__/
+**/intermediate_detection_files/
+.venv/
+.DS_Store
+
+# AI
+ai/training_data/
+ai/training_data_preprocessed/
+ai/runs/
+ai/resources/*.pt
+ai/resources/*.zip
+ai/*.pt
+ai/cropped_box_for_tesseract_*.jpg
+yolov8*.pt
+
+# Server
+server/*.pt
+server/.env
+server/results/
+**/db/data/
+**/db/log/
+**/db/secrets/
+**/*.mp4
+**/*.gif
+
+# Client
+client/target/
+client/Cargo.lock
