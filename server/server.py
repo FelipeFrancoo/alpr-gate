@@ -236,12 +236,30 @@ async def run_detection():
 
         recognitions_between_rounds = []
 
+async def run_cleanup_task():
+    while True:
+        _print("Iniciando limpeza de resultados antigos...")
+        utils.cleanup_old_results(
+            DB_ENABLED, 
+            DB_SERVER, 
+            DB_PORT, 
+            DB_NAME, 
+            DB_USER, 
+            DB_PASSWORD, 
+            SAVE_RESULTS_ENABLED, 
+            RESULTS_PATH, 
+            days_to_keep=3
+        )
+        # Rodar a cada 24 horas
+        await asyncio.sleep(24 * 60 * 60)
+
 def init_websocket_server_and_detection():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
     asyncio.ensure_future(run_websocket_server())
     asyncio.ensure_future(run_detection())
+    asyncio.ensure_future(run_cleanup_task())
 
     try:
         loop.run_forever()

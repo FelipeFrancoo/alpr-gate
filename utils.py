@@ -1,6 +1,7 @@
 import io
 import os
 import shutil
+import time
 import cv2
 import imutils
 import numpy as np
@@ -8,7 +9,7 @@ import psycopg2
 import concurrent
 import pytesseract
 from PIL import Image
-from datetime import datetime
+from datetime import datetime, timedelta
 from skimage.filters import threshold_local
 from ultralytics import YOLO
 
@@ -151,3 +152,32 @@ def save_validated_result(db_enabled: bool, car_id: str, license_plate: str, db_
     if save_results_enabled:
         car_image_raw.save(os.path.join(results_path, f"{car_id}_car.jpg"), "JPEG")
         license_plate_image_raw.save(os.path.join(results_path, f"{car_id}_lp.jpg"), "JPEG")
+
+def cleanup_old_results(db_enabled: bool, db_server: str, db_port: str, db_name: str, db_user: str, db_pass: str, save_results_enabled: bool, results_path: str, days_to_keep: int = 3):
+    current_time = time.time()
+    seconds_to_keep = days_to_keep * 24 * 60 * 60
+
+    if save_results_enabled and os.path.exists(results_path):
+        for filename in os.listdir(results_path):
+            file_path = os.path.join(results_path, filename)
+            if os.path.isfile(file_path):
+                file_age = current_time - os.path.getmtime(file_path)
+                if file_age > seconds_to_keep:
+                    try:
+                        os.remove(file_path)
+                        print(f"Removed old result file: {file_path}")
+                    except Exception as e:
+                        print(f"Error removing file {file_path}: {e}")
+
+    if db_enabled:
+        try:
+            conn = psycopg2.connect(host=db_server, port=db_port, database=db_name, user=db_user, password=db_pass)
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM main_gate_alpr_license_plates WHERE captured_at < %s", (datetime.now() - timedelta(days=days_to_keep),))
+            deleted_rows = cursor.rowcount
+            conn.commit()
+            conn.close()
+            if deleted_rows > 0:
+                print(f"Deleted {deleted_rows} old records from database")
+        except Exception as e:
+            print(f"Error cleaning up database: {e}")
