@@ -1,0 +1,58 @@
+from __future__ import annotations
+
+import logging
+import time
+
+import cv2
+import numpy as np
+from PIL import Image
+
+from frame_buffer import FrameBuffer
+from roi import ROI
+
+logger = logging.getLogger(__name__)
+
+
+class VideoCapture:
+    """
+    Thread de captura de vídeo que alimenta o FrameBuffer.
+    Reconecta automaticamente em caso de falha.
+    """
+
+    def __init__(self, source: str, frame_buffer: FrameBuffer, roi: ROI | None = None, debug: bool = False):
+        self._source = source
+        self._buffer = frame_buffer
+        self._roi = roi
+        self._debug = debug
+
+    def run_forever(self) -> None:
+        """Loop infinito de captura. Projetado para rodar em thread separada."""
+        while True:
+            capture = cv2.VideoCapture(self._source)
+
+            if not capture.isOpened():
+                logger.warning("Falha ao conectar: %s. Tentando em 5s...", self._source)
+                self._buffer.clear()
+                time.sleep(5)
+                continue
+
+            logger.info("Captura aberta: %s", self._source)
+            self._read_frames(capture)
+            capture.release()
+
+    def _read_frames(self, capture: cv2.VideoCapture) -> None:
+        while capture.isOpened():
+            ok, frame = capture.read()
+            if not ok:
+                logger.debug("Fim do vídeo ou falha de leitura, reiniciando...")
+                self._buffer.clear()
+                return
+
+            pil_frame = Image.fromarray(
+                cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).astype(np.uint8)
+            )
+            self._buffer.update(pil_frame)
+
+            if self._debug and self._roi and self._roi.enabled:
+                debug_frame = self._roi.draw_on_frame(frame)
+                cv2.imwrite("./intermediate_detection_files/latest_frame_with_roi.jpg", debug_frame)

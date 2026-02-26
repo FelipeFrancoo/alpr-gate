@@ -1,265 +1,166 @@
+"""
+Main Gate ALPR Server — Orquestrador principal.
+
+Responsabilidades (e somente estas):
+  - Carregar configuração
+  - Instanciar serviços e infraestrutura
+  - Iniciar threads de captura e detecção
+  - Coordenar o loop de detecção → votação → envio
+"""
+from __future__ import annotations
+
 import asyncio
+import logging
 import os
 import sys
-import time
-import uuid
-import cv2
-import numpy as np
 import threading
-import websockets
-from datetime import datetime, timedelta 
-from dotenv import load_dotenv
+import uuid
+from datetime import datetime, timedelta
 from difflib import SequenceMatcher
-from PIL import Image
-from ultralytics import YOLO
+
 import torch
-
-# Correção para a mudança de segurança weights_only do PyTorch 2.6+
 import torch.serialization
-torch.load = lambda *args, **kwargs: torch.serialization.load(*args, **kwargs, weights_only=False)
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-import utils
+# ─── Compatibilidade PyTorch 2.6+ ────────────────────────────────────
+_original_torch_load = torch.load
+def _safe_torch_load(*args, **kwargs):
+    kwargs.setdefault("weights_only", False)
+    return _original_torch_load(*args, **kwargs)
+torch.load = _safe_torch_load
 
-# Carregar variáveis de ambiente
-load_dotenv()
-DEBUG = os.getenv("DEBUG") == "True"
-WS_PORT = int(os.getenv("WS_PORT"))
-RTSP_CAPTURE_CONFIG = os.getenv("RTSP_CAPTURE_CONFIG") 
-PURE_YOLO_MODEL_PATH = os.getenv("PURE_YOLO_MODEL_PATH") 
-LICENSE_PLATE_YOLO_MODEL_PATH = os.getenv("LICENSE_PLATE_YOLO_MODEL_PATH") 
-DB_ENABLED = os.getenv("DB_ENABLED") == "True"
-DB_SERVER = os.getenv("DB_SERVER")
-DB_PORT = os.getenv("DB_PORT")
-DB_NAME = os.getenv("DB_NAME")
-DB_USER = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-SAVE_RESULTS_ENABLED =  os.getenv("SAVE_RESULTS_ENABLED") == "True"
-RESULTS_PATH = os.getenv("RESULTS_PATH")
-SHOULD_SEND_SAME_RESULTS = os.getenv("SHOULD_SEND_SAME_RESULTS") == "True"
-SHOULD_TRY_LP_CROP=os.getenv("SHOULD_TRY_LP_CROP") == "True"
-MINIMUM_NUMBER_OF_CHARS_FOR_MATCH = int(os.getenv("MINIMUM_NUMBER_OF_CHARS_FOR_MATCH"))
-NUMBER_OF_VALIDATION_ROUNDS = int(os.getenv("NUMBER_OF_VALIDATION_ROUNDS"))
-NUMBER_OF_OCCURRENCES_TO_BE_VALID = int(os.getenv("NUMBER_OF_OCCURRENCES_TO_BE_VALID"))
-SKIP_BEFORE_Y_MAX = float(os.getenv("SKIP_BEFORE_Y_MAX"))
+# ─── Path setup ──────────────────────────────────────────────────────
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
-# Inicializar variáveis estáticas globais
-PURE_YOLO_MODEL = YOLO(PURE_YOLO_MODEL_PATH)
-LICENSE_PLATE_YOLO_MODEL = YOLO(LICENSE_PLATE_YOLO_MODEL_PATH)
-CAR_RELATED_LABELS = [
-    utils.normalize_label('car'), 
-    utils.normalize_label('motorcycle'), 
-    utils.normalize_label('bus'), 
-    utils.normalize_label('train'), 
-    utils.normalize_label('truck'),
-    utils.normalize_label('boat'), 
-]
+from config import AppConfig, load_config
+from domain.models import DetectionResult, PlateReading
+from frame_buffer import FrameBuffer
+from infrastructure.database import DatabaseRepository
+from infrastructure.result_storage import ResultStorage
+from infrastructure.video_capture import VideoCapture
+from infrastructure.websocket_server import WebSocketServer
+from roi import ROI
+from services.detection_service import DetectionService
+from services.voting_service import vote_best_plate
 
-def _print(string):
-    if DEBUG: print(string)
+logger = logging.getLogger(__name__)
 
-############ Servidor Web Socket ############
-CONNECTED_SOCKETS = []
-async def handle_connection(websocket, path):
-    global CONNECTED_SOCKETS
-    CONNECTED_SOCKETS.append(websocket)
-    try:
-        await websocket.send("echo")
-        async for message in websocket:
-            pass
-    finally:
-        CONNECTED_SOCKETS.remove(websocket)
-async def run_websocket_server():
-    server = await websockets.serve(handle_connection, "", WS_PORT)
-    await server.wait_closed()
 
-############ Captura de Vídeo ############
-LATEST_FRAME = None
-def run_video_capture():
-    global LATEST_FRAME
-    while True:
-        capture = cv2.VideoCapture(RTSP_CAPTURE_CONFIG)
-        if capture.isOpened() is False:
-            _print(f"Não foi possível conectar à captura de vídeo: {RTSP_CAPTURE_CONFIG}. Tentando novamente em 5 segundos...")
-            LATEST_FRAME = None
-            time.sleep(5)
-            continue
-        
-        _print(f"Captura de vídeo aberta com sucesso: {RTSP_CAPTURE_CONFIG}")
+# ─── Detection Loop ──────────────────────────────────────────────────
 
-        while(capture.isOpened()):
-            able_to_read_frame, frame = capture.read()
-            if able_to_read_frame is False:
-                _print("Fim do vídeo ou não foi possível ler o quadro, reiniciando...")
-                LATEST_FRAME = None
-                break
+class DetectionLoop:
+    """
+    Loop principal que coordena: captura → detecção → votação → envio.
+    Respeita o princípio de responsabilidade única: não faz detecção,
+    não faz OCR, não faz WebSocket — apenas orquestra.
+    """
 
-            # LATEST_FRAME é atualizado aqui
-            LATEST_FRAME = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).astype(np.uint8))
-            
-            # No macOS, a GUI deve estar na thread principal. Como isso roda em uma thread,
-            # desativamos o cv2.imshow aqui para evitar travamentos/quedas.
-            # Se quiser ver o vídeo, use um player direto ou corrija a lógica de threads.
-            # if DEBUG:
-            #     cv2.startWindowThread()
-            #     cv2.namedWindow("frame")
-            #     cv2.imshow("frame", cv2.resize(frame, (750, 750)))
-            #     cv2.waitKey(20)
+    def __init__(
+        self,
+        config: AppConfig,
+        frame_buffer: FrameBuffer,
+        detection_service: DetectionService,
+        ws_server: WebSocketServer,
+        db_repo: DatabaseRepository,
+        storage: ResultStorage,
+    ):
+        self._config = config
+        self._buffer = frame_buffer
+        self._detection = detection_service
+        self._ws = ws_server
+        self._db = db_repo
+        self._storage = storage
+        self._sent_history: list[tuple[str, datetime]] = []
 
-        capture.release()
+    async def run(self) -> None:
+        rounds: list[list[PlateReading]] = []
+        target_rounds = self._config.detection.validation_rounds
+        min_occurrences = self._config.detection.occurrences_to_be_valid
 
-############ Detecção ############
-# [(Image, Image, str)] => array de (imagem do carro, imagem da placa, placa como string)
-def detect_license_plates_from_frame(captured_frame: Image) -> [(Image, Image, str)]:
-    number_of_yolo_boxes, yolo_boxes = utils.detect_with_yolo(PURE_YOLO_MODEL, captured_frame, DEBUG)
-    if number_of_yolo_boxes == 0:
-        _print("Nenhuma imagem de carro encontrada")
-        return []
+        while True:
+            await asyncio.sleep(0.01)
 
-    license_plates_recognized = []
-    utils.prepare_env_for_reading_license_plates(DEBUG)
-    for (i, car_box) in enumerate(yolo_boxes):
-        box_label = utils.normalize_label(
-            PURE_YOLO_MODEL.names[int(car_box.cls)]
+            frame = self._buffer.get()
+            if frame is None:
+                await asyncio.sleep(1)
+                continue
+
+            readings = self._detection.detect_plates(frame)
+            if not readings:
+                continue
+
+            rounds.append(readings)
+            if len(rounds) < target_rounds:
+                continue
+
+            results = vote_best_plate(rounds, min_occurrences)
+            if not results:
+                if rounds:
+                    rounds.pop(0)
+                continue
+
+            await self._send_results(results)
+            rounds.clear()
+
+    async def _send_results(self, results: list[DetectionResult]) -> None:
+        self._prune_history()
+
+        for result in results:
+            result.uuid = str(uuid.uuid4())
+
+            if not self._config.send_duplicates and self._already_sent(result.formatted_plate):
+                logger.debug('Placa já enviada, pulando: "%s"', result.formatted_plate)
+                continue
+
+            self._sent_history.append((result.formatted_plate, datetime.now()))
+            logger.debug("Enviando resultado: %s", result.display_string)
+
+            await self._ws.broadcast_result(result)
+            self._persist_async(result)
+
+    def _persist_async(self, result: DetectionResult) -> None:
+        """Salva no banco e em disco em thread separada para não bloquear."""
+        def _save():
+            self._db.save_plate(result.uuid, result.formatted_plate)
+            self._storage.save_images(result.uuid, result.car_image, result.plate_image)
+
+        threading.Thread(target=_save, daemon=True).start()
+
+    def _already_sent(self, plate_text: str) -> bool:
+        return any(
+            s[0] == plate_text or SequenceMatcher(None, s[0], plate_text).ratio() > 0.8
+            for s in self._sent_history
         )
-        if box_label not in CAR_RELATED_LABELS:
-            _print(f"Rótulo encontrado \"{box_label}\", porém não está em CAR_RELATED_LABELS, pulando")
-            continue
 
-        x_min, y_min, x_max, y_max = car_box.xyxy.cpu().detach().numpy()[0]
-        _print(f"Carro encontrado nas coordenadas: {x_min}, {y_min}, {x_max}, {y_max}")
-        if y_max < SKIP_BEFORE_Y_MAX:
-            _print(f"Carro encontrado, porém está muito longe \"{y_max}\" (necessário \"{SKIP_BEFORE_Y_MAX}\"), pulando")
-            continue
+    def _prune_history(self) -> None:
+        cutoff = datetime.now() - timedelta(minutes=5)
+        self._sent_history = [(p, t) for p, t in self._sent_history if t > cutoff]
 
-        car_image = captured_frame.crop((x_min, y_min, x_max, y_max))
-        if DEBUG:
-            car_image.save(utils.gen_intermediate_file_name(f"cropped_car", "jpg", i))
 
-        number_of_license_plate_boxes_found, license_plates_as_boxes = utils.detect_with_yolo(LICENSE_PLATE_YOLO_MODEL, car_image, DEBUG)
-        if number_of_license_plate_boxes_found == 0:
-            continue
+# ─── Cleanup Task ────────────────────────────────────────────────────
 
-        for (j, license_plate_box) in enumerate(license_plates_as_boxes):
-            license_plate_image, license_plate_as_string = utils.read_license_plate(f"{i}_{j}", license_plate_box, car_image, 500, 20, DEBUG, SHOULD_TRY_LP_CROP, MINIMUM_NUMBER_OF_CHARS_FOR_MATCH)
-            if license_plate_as_string == "":
-                _print(f"Carro {i} ; Resultado {j}, não foi possível encontrar caracteres na placa detectada")
-                continue
-            if len(license_plate_as_string) < MINIMUM_NUMBER_OF_CHARS_FOR_MATCH:
-                _print(f"Placa encontrada {license_plate_as_string}, mas é menor que {MINIMUM_NUMBER_OF_CHARS_FOR_MATCH}")
-                continue
-
-            _print(y_max)
-            _print(f"Placa encontrada {license_plate_as_string}")
-            license_plates_recognized.append((car_image, license_plate_image, license_plate_as_string))
-
-    return license_plates_recognized
-
-# any => Image (não pode ser usado como tipo)
-def validate_results_between_rounds(recognitions_between_rounds: list[list[(any, any, str)]], number_of_occurrences_to_be_valid: int):
-    license_plate_counts = {}
-    for recognitions in recognitions_between_rounds:
-        for _, _, license_plate_as_string in recognitions:
-            if license_plate_as_string in license_plate_counts:
-                license_plate_counts[license_plate_as_string] += 1
-            else:
-                license_plate_counts[license_plate_as_string] = 1
-    
-    validated_recognitions = []
-    for license_plate, times_found in license_plate_counts.items():
-        if times_found < number_of_occurrences_to_be_valid:
-            continue
-        
-        should_break_recognitions_loop = False
-        for recognitions in recognitions_between_rounds:
-            if should_break_recognitions_loop: break
-            for recognized_car_image, recognized_license_plate_image, recognized_license_plate_as_string in recognitions:
-                if should_break_recognitions_loop: break
-                if license_plate == recognized_license_plate_as_string:
-                    validated_recognitions.append((recognized_car_image, recognized_license_plate_image, recognized_license_plate_as_string))
-                    should_break_recognitions_loop = True
-
-    return validated_recognitions
-
-async def run_detection():
-    recognitions_between_rounds = []
-    license_plates_sent_history = []
+async def run_cleanup_task(db: DatabaseRepository, storage: ResultStorage) -> None:
     while True:
-        await asyncio.sleep(0.01) # Verificação na tarefa do servidor websocket
-        if LATEST_FRAME is None:
-            _print("LATEST_FRAME é None, nada a fazer, dormindo por 1 segundo...")
-            time.sleep(1)
-            continue
+        logger.info("Executando limpeza periódica...")
+        db.cleanup_old_records(days_to_keep=3)
+        storage.cleanup_old_files(days_to_keep=3)
+        await asyncio.sleep(24 * 3600)
 
-        license_plates_recognized = detect_license_plates_from_frame(LATEST_FRAME.copy())
-        if len(license_plates_recognized) == 0:
-            continue
 
-        recognitions_between_rounds.append(license_plates_recognized)
-        if len(recognitions_between_rounds) != NUMBER_OF_VALIDATION_ROUNDS:
-            continue
-        
-        validated_results = validate_results_between_rounds(recognitions_between_rounds, NUMBER_OF_OCCURRENCES_TO_BE_VALID)
-        if len(validated_results) == 0:
-            if recognitions_between_rounds != []:
-                recognitions_between_rounds.pop(0)
-            continue
-            
-        _print("Sending results: ")
-        _print(validated_results)
-        license_plates_sent_history = [s for s in license_plates_sent_history if datetime.now() - s[1] <= timedelta(minutes=5)]
-        for res in validated_results:
-            car_image_raw = res[0]
-            license_plate_image_raw = res[1]
-            license_plate_as_string = str(res[2]) # just to make sure it's string
-            license_plate_as_string = license_plate_as_string[:3] + " " + license_plate_as_string[3:]
-            
-            if SHOULD_SEND_SAME_RESULTS == False and any((s[0] == license_plate_as_string or SequenceMatcher(None, s[0], license_plate_as_string).ratio() > 0.8) for s in license_plates_sent_history):
-                _print(f"Already sent this license plate... Skipping (\"{license_plate_as_string}\")")
-                continue
-            license_plates_sent_history.append((license_plate_as_string, datetime.now()))
+# ─── Bootstrap ───────────────────────────────────────────────────────
 
-            car_image = utils.img_to_bytes(car_image_raw)
-            license_plate_image = utils.img_to_bytes(license_plate_image_raw)
-            license_plate_uuid = str(uuid.uuid4())
-            license_plate_formated_string = license_plate_as_string + " => " + license_plate_uuid
-            for socket in CONNECTED_SOCKETS:
-                try:
-                    await socket.send(car_image)
-                    await socket.send(license_plate_image)
-                    await socket.send(license_plate_formated_string)
-                except:
-                    _print("Socket closed before or while the server was sending a response.")
-
-            save_thread = threading.Thread(target=utils.save_validated_result, args=(DB_ENABLED, license_plate_uuid, license_plate_as_string, DB_SERVER, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, SAVE_RESULTS_ENABLED, RESULTS_PATH, car_image_raw, license_plate_image_raw))
-            save_thread.start()
-
-        recognitions_between_rounds = []
-
-async def run_cleanup_task():
-    while True:
-        _print("Iniciando limpeza de resultados antigos...")
-        utils.cleanup_old_results(
-            DB_ENABLED, 
-            DB_SERVER, 
-            DB_PORT, 
-            DB_NAME, 
-            DB_USER, 
-            DB_PASSWORD, 
-            SAVE_RESULTS_ENABLED, 
-            RESULTS_PATH, 
-            days_to_keep=3
-        )
-        # Rodar a cada 24 horas
-        await asyncio.sleep(24 * 60 * 60)
-
-def init_websocket_server_and_detection():
+def _start_async_loop(
+    config: AppConfig,
+    ws_server: WebSocketServer,
+    detection_loop: DetectionLoop,
+    db: DatabaseRepository,
+    storage: ResultStorage,
+) -> None:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    
-    asyncio.ensure_future(run_websocket_server())
-    asyncio.ensure_future(run_detection())
-    asyncio.ensure_future(run_cleanup_task())
+
+    asyncio.ensure_future(ws_server.start())
+    asyncio.ensure_future(detection_loop.run())
+    asyncio.ensure_future(run_cleanup_task(db, storage))
 
     try:
         loop.run_forever()
@@ -268,17 +169,67 @@ def init_websocket_server_and_detection():
         loop.close()
 
 
-if __name__ == "__main__":
-    os.environ['OMP_THREAD_LIMIT'] = '1'
-    if SAVE_RESULTS_ENABLED:
-        if os.path.exists(RESULTS_PATH) == False:
-            os.mkdir(RESULTS_PATH)
+def main() -> None:
+    os.environ["OMP_THREAD_LIMIT"] = "1"
 
-    capture_thread = threading.Thread(target=run_video_capture)
-    work_thread = threading.Thread(target=init_websocket_server_and_detection)
+    # Garantir que o .env é carregado do diretório do server.py
+    server_dir = os.path.dirname(os.path.abspath(__file__))
+    env_path = os.path.join(server_dir, ".env")
+    config = load_config(env_path)
+
+    # Logging
+    log_level = logging.DEBUG if config.debug else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    config.log_summary()
+
+    # Componentes
+    roi = ROI.from_env(config.roi_points)
+    frame_buffer = FrameBuffer()
+
+    detection_service = DetectionService(config, roi)
+    ws_server = WebSocketServer(config.ws_port)
+    db_repo = DatabaseRepository(config.database)
+    storage = ResultStorage(config.storage)
+    storage.ensure_directory()
+
+    video = VideoCapture(config.video_source, frame_buffer, roi=roi, debug=config.debug)
+
+    detection_loop = DetectionLoop(
+        config=config,
+        frame_buffer=frame_buffer,
+        detection_service=detection_service,
+        ws_server=ws_server,
+        db_repo=db_repo,
+        storage=storage,
+    )
+
+    if roi.enabled:
+        print(f"✓ ROI ativada com {len(roi.points)} pontos")
+    else:
+        print("⚠ ROI desativada — processando frame inteiro")
+
+    print(f"✓ WebSocket na porta {config.ws_port}")
+    print(f"✓ Captura: {config.video_source}")
+
+    # Threads
+    capture_thread = threading.Thread(target=video.run_forever, daemon=True)
+    work_thread = threading.Thread(
+        target=_start_async_loop,
+        args=(config, ws_server, detection_loop, db_repo, storage),
+        daemon=True,
+    )
 
     capture_thread.start()
     work_thread.start()
 
     capture_thread.join()
     work_thread.join()
+
+
+if __name__ == "__main__":
+    main()
