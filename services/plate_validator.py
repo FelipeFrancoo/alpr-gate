@@ -4,14 +4,14 @@ import re
 
 
 # Mapeamento de caracteres frequentemente confundidos pelo OCR em posições numéricas
-_OCR_DIGIT_CORRECTIONS: dict[str, str] = {
-    "O": "0",
-    "I": "1",
-    "L": "1",
-    "S": "5",
-    "Z": "2",
-    "B": "8",
-    "G": "9",
+_OCR_DIGIT_CORRECTIONS: dict[str, list[str]] = {
+    "O": ["0"],
+    "I": ["1"],
+    "L": ["4", "1"],
+    "S": ["5"],
+    "Z": ["2"],
+    "B": ["8"],
+    "G": ["9"],
 }
 
 _PATTERN_OLD = re.compile(r"^[A-Z]{3}[0-9]{4}$")
@@ -39,15 +39,35 @@ def validate_plate(text: str | None) -> str | None:
     if len(cleaned) != 7:
         return None
 
+    if _PATTERN_OLD.match(cleaned) or _PATTERN_MERCOSUL.match(cleaned):
+        return cleaned
+
     chars = list(cleaned)
+    candidates: list[list[str]] = [chars]
+
     for pos in _DIGIT_POSITIONS:
-        replacement = _OCR_DIGIT_CORRECTIONS.get(chars[pos])
-        if replacement:
-            chars[pos] = replacement
+        next_candidates: list[list[str]] = []
+        for cand in candidates:
+            current = cand[pos]
+            if current.isdigit():
+                next_candidates.append(cand)
+                continue
 
-    corrected = "".join(chars)
+            options = _OCR_DIGIT_CORRECTIONS.get(current)
+            if not options:
+                next_candidates.append(cand)
+                continue
 
-    if _PATTERN_OLD.match(corrected) or _PATTERN_MERCOSUL.match(corrected):
-        return corrected
+            for replacement in options:
+                new_cand = cand.copy()
+                new_cand[pos] = replacement
+                next_candidates.append(new_cand)
+
+        candidates = next_candidates
+
+    for candidate in candidates:
+        corrected = "".join(candidate)
+        if _PATTERN_OLD.match(corrected) or _PATTERN_MERCOSUL.match(corrected):
+            return corrected
 
     return None

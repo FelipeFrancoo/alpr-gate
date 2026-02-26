@@ -49,7 +49,7 @@ def warp_plate(
     x1: int, y1: int, x2: int, y2: int,
     output_width: int = 400,
     output_height: int = 130,
-    padding: int = 10,
+    padding: int = 4,
 ) -> np.ndarray:
     """
     Recorta a placa com padding extra e normaliza via transformação projetiva.

@@ -30,7 +30,7 @@ class DetectionService:
         self._vehicle_model = YOLO(config.yolo.vehicle_model_path)
         self._plate_model = YOLO(config.yolo.plate_model_path)
 
-    def detect_plates(self, frame: Image.Image) -> list[PlateReading]:
+    def detect_plates(self, frame: Image.Image) -> tuple[list[PlateReading], bool]:
         """
         Pipeline completo de detecção num único frame:
           1. Detectar veículos com YOLO
@@ -41,21 +41,23 @@ class DetectionService:
         vehicle_boxes = self._detect_vehicles(frame)
         if not vehicle_boxes:
             logger.debug("Nenhum veículo detectado")
-            return []
+            return [], False
 
         self._prepare_debug_dir()
         readings: list[PlateReading] = []
+        vehicles_in_roi = False
 
         for i, box in enumerate(vehicle_boxes):
             result = self._process_vehicle(frame, box, i)
             if result is None:
                 continue
 
+            vehicles_in_roi = True
             car_crop, vehicle_coords = result
             plate_readings = self._read_plates_from_vehicle(car_crop, i, frame, vehicle_coords)
             readings.extend(plate_readings)
 
-        return readings
+        return readings, vehicles_in_roi
 
     # ─── Pipeline interno ─────────────────────────────────────────────
 
@@ -139,13 +141,13 @@ class DetectionService:
             abs_y2 = vy1 + y2
             frame_cv = cv2.cvtColor(np.array(frame), cv2.COLOR_RGB2BGR)
             abs_plate_w = abs_x2 - abs_x1
-            pad = 20 if abs_plate_w < 120 else 15
+            pad = 8 if abs_plate_w < 120 else 6
             warped = ocr_service.warp_plate(frame_cv, abs_x1, abs_y1, abs_x2, abs_y2, padding=pad)
             logger.debug("  [Placa %d_%d] Usando frame completo (coords abs: %d,%d,%d,%d)",
                          car_idx, plate_idx, abs_x1, abs_y1, abs_x2, abs_y2)
         else:
             car_cv = cv2.cvtColor(np.array(car_image), cv2.COLOR_RGB2BGR)
-            pad = 15 if plate_w < 120 else 10
+            pad = 6 if plate_w < 120 else 4
             warped = ocr_service.warp_plate(car_cv, x1, y1, x2, y2, padding=pad)
 
         if warped.size == 0:
@@ -172,7 +174,7 @@ class DetectionService:
     def _is_inside_roi(self, x_min: float, y_min: float, x_max: float, y_max: float) -> bool:
         if not self._roi.enabled:
             return True
-        return self._roi.contains_box(x_min, y_min, x_max, y_max, threshold=0.3)
+        return self._roi.contains_box(x_min, y_min, x_max, y_max, threshold=0.1)
 
     def _prepare_debug_dir(self) -> None:
         if not self._config.debug:

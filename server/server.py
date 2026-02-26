@@ -14,6 +14,7 @@ import logging
 import os
 import sys
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
@@ -70,6 +71,11 @@ class DetectionLoop:
         self._db = db_repo
         self._storage = storage
         self._sent_history: list[tuple[str, datetime]] = []
+        self._roi_active = False
+        self._roi_last_seen: float | None = None
+        self._roi_session = 0
+        self._roi_capture_index = 0
+        self._roi_exit_grace = 0.6
 
     async def run(self) -> None:
         rounds: list[list[PlateReading]] = []
@@ -84,7 +90,12 @@ class DetectionLoop:
                 await asyncio.sleep(1)
                 continue
 
-            readings = self._detection.detect_plates(frame)
+            readings, vehicles_in_roi = self._detection.detect_plates(frame)
+            self._update_roi_state(vehicles_in_roi)
+
+            if self._roi_active and readings:
+                self._capture_roi_readings(readings)
+
             if not readings:
                 continue
 
@@ -100,6 +111,33 @@ class DetectionLoop:
 
             await self._send_results(results)
             rounds.clear()
+
+    def _update_roi_state(self, vehicles_in_roi: bool) -> None:
+        now = time.monotonic()
+        if vehicles_in_roi:
+            if not self._roi_active:
+                self._roi_active = True
+                self._roi_session += 1
+                self._roi_capture_index = 0
+                logger.info("ROI ativa: iniciando capturas da sessão %d", self._roi_session)
+            self._roi_last_seen = now
+            return
+
+        if not self._roi_active or self._roi_last_seen is None:
+            return
+
+        if now - self._roi_last_seen > self._roi_exit_grace:
+            logger.info("ROI inativa: encerrando sessão %d", self._roi_session)
+            self._roi_active = False
+
+    def _capture_roi_readings(self, readings: list[PlateReading]) -> None:
+        if not self._storage.enabled:
+            return
+
+        for reading in readings:
+            self._roi_capture_index += 1
+            capture_id = f"roi_{self._roi_session:03d}_{self._roi_capture_index:04d}"
+            self._storage.save_images(capture_id, reading.car_image, reading.plate_image)
 
     async def _send_results(self, results: list[DetectionResult]) -> None:
         self._prune_history()
