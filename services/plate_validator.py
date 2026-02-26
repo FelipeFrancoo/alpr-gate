@@ -12,6 +12,20 @@ _OCR_DIGIT_CORRECTIONS: dict[str, list[str]] = {
     "Z": ["2"],
     "B": ["8"],
     "G": ["9"],
+    "A": ["4"],
+}
+
+_OCR_LETTER_CORRECTIONS: dict[str, list[str]] = {
+    "0": ["O"],
+    "1": ["I"],
+    "2": ["Z"],
+    "3": ["E"],
+    "4": ["A", "L"],
+    "5": ["S"],
+    "6": ["G"],
+    "7": ["T"],
+    "8": ["B"],
+    "9": ["G"],
 }
 
 _PATTERN_OLD = re.compile(r"^[A-Z]{3}[0-9]{4}$")
@@ -19,6 +33,9 @@ _PATTERN_MERCOSUL = re.compile(r"^[A-Z]{3}[0-9][A-Z][0-9]{2}$")
 
 # Posições 3-6 devem ser dígitos em ambos os formatos brasileiros
 _DIGIT_POSITIONS = (3, 4, 5, 6)
+_OLD_TYPES = ("L", "L", "L", "D", "D", "D", "D")
+_MERC_TYPES = ("L", "L", "L", "D", "L", "D", "D")
+_MAX_CANDIDATES = 64
 
 
 def validate_plate(text: str | None) -> str | None:
@@ -42,18 +59,36 @@ def validate_plate(text: str | None) -> str | None:
     if _PATTERN_OLD.match(cleaned) or _PATTERN_MERCOSUL.match(cleaned):
         return cleaned
 
-    chars = list(cleaned)
-    candidates: list[list[str]] = [chars]
+    corrected = _find_valid_candidate(cleaned, _PATTERN_OLD, _OLD_TYPES)
+    if corrected:
+        return corrected
 
-    for pos in _DIGIT_POSITIONS:
+    corrected = _find_valid_candidate(cleaned, _PATTERN_MERCOSUL, _MERC_TYPES)
+    if corrected:
+        return corrected
+
+    return None
+
+
+def _find_valid_candidate(text: str, pattern: re.Pattern[str], types: tuple[str, ...]) -> str | None:
+    candidates = [list(text)]
+    for pos, expected in enumerate(types):
         next_candidates: list[list[str]] = []
         for cand in candidates:
             current = cand[pos]
-            if current.isdigit():
-                next_candidates.append(cand)
-                continue
+            if expected == "D":
+                if current.isdigit():
+                    next_candidates.append(cand)
+                    continue
 
-            options = _OCR_DIGIT_CORRECTIONS.get(current)
+                options = _OCR_DIGIT_CORRECTIONS.get(current, [])
+            else:
+                if current.isalpha():
+                    next_candidates.append(cand)
+                    continue
+
+                options = _OCR_LETTER_CORRECTIONS.get(current, [])
+
             if not options:
                 next_candidates.append(cand)
                 continue
@@ -63,11 +98,14 @@ def validate_plate(text: str | None) -> str | None:
                 new_cand[pos] = replacement
                 next_candidates.append(new_cand)
 
+            if len(next_candidates) > _MAX_CANDIDATES:
+                next_candidates = next_candidates[:_MAX_CANDIDATES]
+
         candidates = next_candidates
 
     for candidate in candidates:
         corrected = "".join(candidate)
-        if _PATTERN_OLD.match(corrected) or _PATTERN_MERCOSUL.match(corrected):
+        if pattern.match(corrected):
             return corrected
 
     return None
