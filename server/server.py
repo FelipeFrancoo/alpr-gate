@@ -167,15 +167,18 @@ class DetectionLoop:
         self._db = db_repo
         self._storage = storage
         self._sent_history: list[tuple[str, datetime]] = []
+        
+        # Controle de Sessão da ROI
         self._roi_active = False
         self._roi_last_seen: float | None = None
-        self._roi_session = 0
-        self._roi_capture_index = 0
+        self._roi_session_id = 0
         self._roi_exit_grace = 0.6
+        
+        # Buffer da sessão atual (acumula todas as leituras da passagem do veículo)
+        self._session_rounds: list[list[PlateReading]] = []
+        self._session_sent_plates: set[str] = set()
 
     async def run(self) -> None:
-        rounds: list[list[PlateReading]] = []
-        target_rounds = self._config.detection.validation_rounds
         min_occurrences = self._config.detection.occurrences_to_be_valid
 
         while True:
@@ -183,7 +186,7 @@ class DetectionLoop:
 
             frame = self._buffer.get()
             if frame is None:
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.1)
                 continue
 
             readings, vehicles_in_roi = self._detection.detect_plates(frame)
@@ -204,33 +207,30 @@ class DetectionLoop:
             except Exception as e:
                 logger.error(f"Erro ao processar frame para vídeo: {e}")
 
+            # Lógica de Sessão: Acumular leituras enquanto o carro está na ROI
             if self._roi_active and readings:
-                self._capture_roi_readings(readings)
-
-            if not readings:
-                continue
-
-            rounds.append(readings)
-            if len(rounds) < target_rounds:
-                continue
-
-            results = vote_best_plate(rounds, min_occurrences)
-            if not results:
-                if rounds:
-                    rounds.pop(0)
-                continue
-
-            await self._send_results(results)
-            rounds.clear()
+                self._session_rounds.append(readings)
+                
+                # Votação contínua com TODO o histórico da sessão atual
+                results = vote_best_plate(self._session_rounds, min_occurrences)
+                
+                # Filtrar apenas placas que ainda não enviamos nesta mesma sessão
+                new_results = [r for r in results if r.formatted_plate not in self._session_sent_plates]
+                
+                if new_results:
+                    for r in new_results:
+                        self._session_sent_plates.add(r.formatted_plate)
+                    await self._send_results(new_results)
 
     def _update_roi_state(self, vehicles_in_roi: bool) -> None:
         now = time.monotonic()
         if vehicles_in_roi:
             if not self._roi_active:
                 self._roi_active = True
-                self._roi_session += 1
-                self._roi_capture_index = 0
-                logger.info("ROI ativa: iniciando capturas da sessão %d", self._roi_session)
+                self._roi_session_id += 1
+                self._session_rounds.clear()
+                self._session_sent_plates.clear()
+                logger.info("Veículo entrou na ROI (Sessão %d iniciada)", self._roi_session_id)
             self._roi_last_seen = now
             return
 
@@ -238,17 +238,10 @@ class DetectionLoop:
             return
 
         if now - self._roi_last_seen > self._roi_exit_grace:
-            logger.info("ROI inativa: encerrando sessão %d", self._roi_session)
+            logger.info("Veículo saiu da ROI (Sessão %d encerrada)", self._roi_session_id)
             self._roi_active = False
-
-    def _capture_roi_readings(self, readings: list[PlateReading]) -> None:
-        if not self._storage.enabled:
-            return
-
-        for reading in readings:
-            self._roi_capture_index += 1
-            capture_id = f"roi_{self._roi_session:03d}_{self._roi_capture_index:04d}"
-            self._storage.save_images(capture_id, reading.car_image, reading.plate_image)
+            self._session_rounds.clear()
+            self._session_sent_plates.clear()
 
     async def _send_results(self, results: list[DetectionResult]) -> None:
         self._prune_history()
@@ -308,7 +301,7 @@ def _start_async_loop(
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    asyncio.ensure_future(ws_server.start())
+    # Removido: asyncio.ensure_future(ws_server.start()) pois o FastAPI já cuida do WebSocket
     asyncio.ensure_future(detection_loop.run())
     asyncio.ensure_future(run_cleanup_task(db, storage))
 
@@ -380,6 +373,7 @@ def main() -> None:
     # Iniciar servidor web FastAPI
     print(f"✓ Dashboard Web disponível em: http://localhost:8765")
     try:
+        # O FastAPI já está rodando o WebSocket na porta 8765, então não precisamos do WebSocketServer antigo
         uvicorn.run(app, host="0.0.0.0", port=8765, log_level="warning")
     except KeyboardInterrupt:
         print("\nDesligando o servidor...")
