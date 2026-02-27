@@ -16,11 +16,18 @@ import sys
 import threading
 import time
 import uuid
+import queue
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 
+import cv2
+import numpy as np
 import torch
 import torch.serialization
+import uvicorn
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.templating import Jinja2Templates
 
 # ─── Compatibilidade PyTorch 2.6+ ────────────────────────────────────
 _original_torch_load = torch.load
@@ -45,6 +52,95 @@ from services.voting_service import vote_best_plate
 
 logger = logging.getLogger(__name__)
 
+# ─── FastAPI Setup ───────────────────────────────────────────────────
+app = FastAPI(title="ALPR Monitor")
+templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
+video_frame_queue = queue.Queue(maxsize=1)
+connected_websockets: list[WebSocket] = []
+
+@app.get("/", response_class=HTMLResponse)
+async def get_dashboard(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+
+def generate_frames():
+    while True:
+        try:
+            frame_bytes = video_frame_queue.get(timeout=1.0)
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        except queue.Empty:
+            continue
+
+@app.get("/video_feed")
+async def video_feed():
+    return StreamingResponse(generate_frames(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    connected_websockets.append(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        connected_websockets.remove(websocket)
+
+async def broadcast_to_web(result: DetectionResult):
+    data = {
+        "plate": result.formatted_plate,
+        "confidence": 1.0 # Placeholder, já que o modelo atual não expõe a confiança final facilmente
+    }
+    for ws in connected_websockets:
+        try:
+            await ws.send_json(data)
+        except Exception:
+            pass
+
+def draw_results(frame: np.ndarray, roi_points: list[tuple[int, int]] | None, readings: list[PlateReading], vehicles_in_roi: bool) -> np.ndarray:
+    # Garantir que o frame é um array numpy válido antes de copiar
+    if not isinstance(frame, np.ndarray):
+        try:
+            frame = np.array(frame)
+        except Exception:
+            return frame
+            
+    display_frame = frame.copy()
+    
+    # Desenhar ROI
+    if roi_points:
+        roi_color = (0, 255, 0) if vehicles_in_roi else (0, 0, 255)
+        
+        # Garantir que roi_points seja uma lista de tuplas de inteiros
+        try:
+            if isinstance(roi_points, str):
+                # Caso venha como string do .env (ex: "889,188;887,295...")
+                pts_list = []
+                for pt_str in roi_points.split(';'):
+                    if pt_str.strip():
+                        x, y = map(int, pt_str.split(','))
+                        pts_list.append((x, y))
+                pts = np.array(pts_list, np.int32)
+            else:
+                pts = np.array(roi_points, np.int32)
+                
+            pts = pts.reshape((-1, 1, 2))
+            cv2.polylines(display_frame, [pts], True, roi_color, 2)
+            
+            # Pegar o primeiro ponto para colocar o texto
+            first_pt = pts[0][0]
+            cv2.putText(display_frame, "ROI", (int(first_pt[0]), int(first_pt[1]) - 10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, roi_color, 2)
+        except Exception as e:
+            logger.error(f"Erro ao desenhar ROI: {e}")
+
+    # Desenhar Leituras (Como PlateReading não tem as coordenadas originais, desenhamos no canto)
+    y_offset = 30
+    for reading in readings:
+        cv2.putText(display_frame, f"LIDO: {reading.text}", (10, y_offset), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+        y_offset += 40
+
+    return display_frame
 
 # ─── Detection Loop ──────────────────────────────────────────────────
 
@@ -92,6 +188,21 @@ class DetectionLoop:
 
             readings, vehicles_in_roi = self._detection.detect_plates(frame)
             self._update_roi_state(vehicles_in_roi)
+
+            # Atualizar frame de vídeo para o dashboard
+            try:
+                display_frame = draw_results(frame, self._config.roi_points, readings, vehicles_in_roi)
+                if isinstance(display_frame, np.ndarray):
+                    if video_frame_queue.full():
+                        try:
+                            video_frame_queue.get_nowait()
+                        except queue.Empty:
+                            pass
+                    ret, buffer = cv2.imencode('.jpg', display_frame)
+                    if ret:
+                        video_frame_queue.put(buffer.tobytes())
+            except Exception as e:
+                logger.error(f"Erro ao processar frame para vídeo: {e}")
 
             if self._roi_active and readings:
                 self._capture_roi_readings(readings)
@@ -153,6 +264,7 @@ class DetectionLoop:
             logger.debug("Enviando resultado: %s", result.display_string)
 
             await self._ws.broadcast_result(result)
+            await broadcast_to_web(result)
             self._persist_async(result)
 
     def _persist_async(self, result: DetectionResult) -> None:
@@ -265,8 +377,15 @@ def main() -> None:
     capture_thread.start()
     work_thread.start()
 
-    capture_thread.join()
-    work_thread.join()
+    # Iniciar servidor web FastAPI
+    print(f"✓ Dashboard Web disponível em: http://localhost:8765")
+    try:
+        uvicorn.run(app, host="0.0.0.0", port=8765, log_level="warning")
+    except KeyboardInterrupt:
+        print("\nDesligando o servidor...")
+    finally:
+        # O daemon=True nas threads garante que elas morram quando a thread principal (uvicorn) terminar.
+        print("Servidor encerrado.")
 
 
 if __name__ == "__main__":

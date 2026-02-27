@@ -7,4 +7,7 @@ easyocr
 python-dotenv==1.0.0
 ultralytics==8.0.147
 websockets==11.0.3
-psycopg2-binary==2.9.9
+psycopg2-binary==2.9.9fastapi
+uvicorn
+jinja2
+python-multipart

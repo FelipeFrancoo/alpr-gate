@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ALPR Monitor</title>
+    <style>
+        :root { 
+            --bg-main: #0a0a0a; 
+            --bg-panel: #141414; 
+            --text-main: #e5e5e5; 
+            --text-muted: #888888;
+            --border-color: #2a2a2a;
+            --accent: #ffffff;
+            --success: #22c55e;
+            --error: #ef4444;
+        }
+        
+        body { 
+            margin: 0; 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
+            background: var(--bg-main); 
+            color: var(--text-main); 
+            display: flex; 
+            height: 100vh; 
+            overflow: hidden; 
+        }
+        
+        /* Layout */
+        .container { display: flex; width: 100%; height: 100%; }
+        
+        .video-section { 
+            flex: 1; 
+            display: flex; 
+            flex-direction: column; 
+            border-right: 1px solid var(--border-color); 
+            position: relative; 
+            justify-content: center; 
+            align-items: center; 
+            background: #000; 
+        }
+        
+        .sidebar { 
+            width: 380px; 
+            display: flex; 
+            flex-direction: column; 
+            background: var(--bg-panel); 
+        }
+        
+        /* Vídeo e Status */
+        .live-feed { 
+            width: 100%; 
+            height: 100%; 
+            object-fit: contain; 
+            transition: opacity 0.3s ease;
+        }
+        
+        .status-container {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(4px);
+            padding: 6px 12px;
+            border-radius: 6px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            font-size: 0.75rem;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            z-index: 10;
+        }
+
+        .status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--error);
+        }
+
+        .status-dot.online {
+            background: var(--success);
+            box-shadow: 0 0 8px var(--success);
+            animation: pulse 2s infinite;
+        }
+
+        .status-text {
+            color: var(--text-muted);
+        }
+        .status-text.online {
+            color: var(--text-main);
+        }
+        
+        /* Sidebar Header */
+        .sidebar-header { 
+            padding: 24px 20px; 
+            border-bottom: 1px solid var(--border-color); 
+        }
+        
+        .sidebar-header h2 { 
+            margin: 0; 
+            font-size: 0.85rem; 
+            color: var(--text-muted); 
+            text-transform: uppercase; 
+            letter-spacing: 1.5px; 
+            font-weight: 500;
+        }
+        
+        /* Lista de Placas */
+        .log-container { 
+            flex: 1; 
+            overflow-y: auto; 
+            padding: 16px; 
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        
+        .log-card { 
+            background: var(--bg-main); 
+            border: 1px solid var(--border-color);
+            padding: 16px; 
+            border-radius: 8px; 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: flex-start; 
+            animation: fadeIn 0.4s ease-out; 
+            transition: transform 0.2s ease, border-color 0.2s ease;
+        }
+
+        .log-card:hover {
+            border-color: #444;
+            transform: translateY(-1px);
+        }
+        
+        .log-info { 
+            display: flex; 
+            flex-direction: column; 
+            gap: 6px;
+        }
+        
+        .plate-number { 
+            font-size: 1.4rem; 
+            font-weight: 600; 
+            color: var(--accent); 
+            font-family: "SF Mono", "Menlo", "Monaco", "Courier New", monospace; 
+            letter-spacing: 1px; 
+        }
+        
+        .timestamp { 
+            font-size: 0.75rem; 
+            color: var(--text-muted); 
+        }
+        
+        .empty-state { 
+            text-align: center; 
+            color: var(--text-muted); 
+            margin-top: 40px; 
+            font-size: 0.85rem;
+        }
+
+        /* Animações */
+        @keyframes pulse { 
+            0% { opacity: 1; } 
+            50% { opacity: 0.5; } 
+            100% { opacity: 1; } 
+        }
+        
+        @keyframes fadeIn { 
+            from { opacity: 0; transform: translateY(-10px); } 
+            to { opacity: 1; transform: translateY(0); } 
+        }
+        
+        /* Scrollbar minimalista */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #333; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #555; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Área do Vídeo -->
+        <div class="video-section">
+            <div class="status-container" id="connection-status">
+                <div class="status-dot" id="status-dot"></div>
+                <span class="status-text" id="status-text">Desconectado</span>
+            </div>
+            <img src="/video_feed" class="live-feed" id="video-feed" alt="Aguardando sinal de vídeo...">
+        </div>
+
+        <!-- Barra Lateral -->
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <h2>Registro de Leituras</h2>
+            </div>
+            <div class="log-container" id="logs">
+                <div class="empty-state" id="empty-msg">Nenhum veículo detectado ainda.</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const logsContainer = document.getElementById('logs');
+        const emptyMsg = document.getElementById('empty-msg');
+        const statusDot = document.getElementById('status-dot');
+        const statusText = document.getElementById('status-text');
+        const videoFeed = document.getElementById('video-feed');
+        
+        let ws;
+        let reconnectInterval;
+
+        function updateStatus(isOnline) {
+            if (isOnline) {
+                statusDot.classList.add('online');
+                statusText.classList.add('online');
+                statusText.textContent = 'Ao Vivo';
+                videoFeed.style.opacity = '1';
+            } else {
+                statusDot.classList.remove('online');
+                statusText.classList.remove('online');
+                statusText.textContent = 'Desconectado';
+                videoFeed.style.opacity = '0.3';
+            }
+        }
+
+        function connectWebSocket() {
+            ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+
+            ws.onopen = () => {
+                updateStatus(true);
+                clearInterval(reconnectInterval);
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                addLog(data);
+            };
+
+            ws.onclose = () => {
+                updateStatus(false);
+                // Tentar reconectar a cada 3 segundos
+                reconnectInterval = setTimeout(connectWebSocket, 3000);
+            };
+
+            ws.onerror = () => {
+                ws.close();
+            };
+        }
+
+        // Monitorar se a imagem do vídeo falha (servidor caiu)
+        videoFeed.onerror = () => {
+            updateStatus(false);
+            // Tenta recarregar a imagem a cada 3 segundos se falhar
+            setTimeout(() => {
+                videoFeed.src = '/video_feed?' + new Date().getTime();
+            }, 3000);
+        };
+
+        videoFeed.onload = () => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                updateStatus(true);
+            }
+        };
+
+        function addLog(data) {
+            if (emptyMsg) {
+                emptyMsg.style.display = 'none';
+            }
+
+            const now = new Date();
+            const timeString = now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+            const card = document.createElement('div');
+            card.className = 'log-card';
+            card.innerHTML = `
+                <div class="log-info">
+                    <span class="plate-number">${data.plate}</span>
+                </div>
+                <span class="timestamp">${timeString}</span>
+            `;
+
+            logsContainer.insertBefore(card, logsContainer.firstChild);
+
+            if (logsContainer.children.length > 50) {
+                logsContainer.removeChild(logsContainer.lastChild);
+            }
+        }
+
+        // Iniciar conexão
+        connectWebSocket();
+    </script>
+</body>
+</html>
