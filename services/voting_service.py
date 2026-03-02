@@ -102,13 +102,21 @@ def _find_dominant_group(
 
 def _reconstruct_plate(plates: list[str]) -> str:
     """Reconstrói a placa votando caractere a caractere por posição."""
-    max_len = max(len(p) for p in plates)
+    if not plates:
+        return ""
+
+    # Filtra por tamanho predominante para evitar ruído
+    lengths = [len(p) for p in plates]
+    dominant_len = max(set(lengths), key=lengths.count)
+    valid_plates = [p for p in plates if len(p) == dominant_len]
+
     reconstructed: list[str] = []
 
-    for pos in range(max_len):
-        chars_at_pos = [p[pos] for p in plates if len(p) > pos]
+    for pos in range(dominant_len):
+        chars_at_pos = [p[pos] for p in valid_plates]
         if not chars_at_pos:
             break
+        # Votação simples: caractere mais frequente vence
         winner = max(set(chars_at_pos), key=chars_at_pos.count)
         reconstructed.append(winner)
 

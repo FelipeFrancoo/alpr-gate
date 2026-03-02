@@ -30,6 +30,7 @@ class DetectionConfig:
     skip_before_y_max: float
     validate_brazilian_plate: bool
     try_plate_crop: bool
+    rtsp_reconnect_seconds: int
 
 
 @dataclass(frozen=True)
@@ -121,6 +122,7 @@ def load_config(env_path: str | None = None) -> AppConfig:
             skip_before_y_max=_env_float("SKIP_BEFORE_Y_MAX", 0),
             validate_brazilian_plate=_env_bool("VALIDATE_BRAZILIAN_PLATE", True),
             try_plate_crop=_env_bool("SHOULD_TRY_LP_CROP"),
+            rtsp_reconnect_seconds=_env_int("RTSP_RECONNECT_SECONDS", 5),
         ),
         storage=StorageConfig(
             save_enabled=_env_bool("SAVE_RESULTS_ENABLED"),

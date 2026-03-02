@@ -19,11 +19,12 @@ class VideoCapture:
     Reconecta automaticamente em caso de falha.
     """
 
-    def __init__(self, source: str, frame_buffer: FrameBuffer, roi: ROI | None = None, debug: bool = False):
+    def __init__(self, source: str, frame_buffer: FrameBuffer, roi: ROI | None = None, debug: bool = False, reconnect_interval: int = 5):
         self._source = source
         self._buffer = frame_buffer
         self._roi = roi
         self._debug = debug
+        self._reconnect_interval = reconnect_interval
 
     def run_forever(self) -> None:
         """Loop infinito de captura. Projetado para rodar em thread separada."""
@@ -31,12 +32,16 @@ class VideoCapture:
             capture = cv2.VideoCapture(self._source)
 
             if not capture.isOpened():
-                logger.warning("Falha ao conectar: %s. Tentando em 5s...", self._source)
+                logger.warning("Falha ao conectar: %s. Tentando em %ds...", self._source, self._reconnect_interval)
                 self._buffer.clear()
-                time.sleep(5)
+                time.sleep(self._reconnect_interval)
                 continue
 
             logger.info("Captura aberta: %s", self._source)
+            if self._source.startswith("rtsp"):
+                # Reduz latência em fluxos RTSP
+                capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            
             self._read_frames(capture)
             capture.release()
 
@@ -44,7 +49,7 @@ class VideoCapture:
         while capture.isOpened():
             ok, frame = capture.read()
             if not ok:
-                logger.debug("Fim do vídeo ou falha de leitura, reiniciando...")
+                logger.warning("Fim do luxo de vídeo ou falha de leitura (frame vazio), reiniciando conexão...")
                 self._buffer.clear()
                 return
 

@@ -65,10 +65,13 @@ async def get_dashboard(request: Request):
 def generate_frames():
     while True:
         try:
-            frame_bytes = video_frame_queue.get(timeout=1.0)
+            # Reduzimos o timeout para não prender a resposta HTTP
+            frame_bytes = video_frame_queue.get(timeout=0.1)
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
         except queue.Empty:
+            # Em vez de continue rápido, um pequeno sleep para não fritar a CPU
+            time.sleep(0.01)
             continue
 
 @app.get("/video_feed")
@@ -180,14 +183,33 @@ class DetectionLoop:
 
     async def run(self) -> None:
         min_occurrences = self._config.detection.occurrences_to_be_valid
+        
+        # Cria um frame placeholder preto e escrevendo "AGUARDANDO" uma vez para reutilizar
+        placeholder_frame = np.zeros((480, 640, 3), np.uint8)
+        cv2.putText(placeholder_frame, "AGUARDANDO VIDEO...", (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        ret, placeholder_bytes = cv2.imencode('.jpg', placeholder_frame)
+        placeholder_bytes = placeholder_bytes.tobytes() if ret else None
+        
+        last_frame_time = time.time()
 
         while True:
             await asyncio.sleep(0.01)
 
             frame = self._buffer.get()
             if frame is None:
-                await asyncio.sleep(0.1)
+                # Se passou 5s sem vídeo, envia frame de espera
+                if time.time() - last_frame_time > 5.0:
+                     if placeholder_bytes and not video_frame_queue.full():
+                          try:
+                               video_frame_queue.put_nowait(placeholder_bytes)
+                          except queue.Full:
+                               pass
+                     await asyncio.sleep(1.0) # Não spama a fila
+                else:
+                     await asyncio.sleep(0.1)
                 continue
+            
+            last_frame_time = time.time()
 
             readings, vehicles_in_roi = self._detection.detect_plates(frame)
             self._update_roi_state(vehicles_in_roi)
@@ -196,12 +218,18 @@ class DetectionLoop:
             try:
                 display_frame = draw_results(frame, self._config.roi_points, readings, vehicles_in_roi)
                 if isinstance(display_frame, np.ndarray):
+                    # Atualizar feed de vídeo independente da detecção
+                    # Se a fila estiver cheia, remove o item antigo para sempre ter o frame mais recente (LIFO effect)
                     if video_frame_queue.full():
                         try:
                             video_frame_queue.get_nowait()
                         except queue.Empty:
                             pass
-                    ret, buffer = cv2.imencode('.jpg', display_frame)
+                    
+                    # Encode apenas se tiver gente assistindo (otimização)
+                    # Mas como não temos controle de 'clientes conectados' fácil aqui, fazemos sempre
+                    # Usar qualidade 70 para ficar mais leve na rede
+                    ret, buffer = cv2.imencode('.jpg', display_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
                     if ret:
                         video_frame_queue.put(buffer.tobytes())
             except Exception as e:
@@ -214,6 +242,14 @@ class DetectionLoop:
                 # Votação contínua com TODO o histórico da sessão atual
                 results = vote_best_plate(self._session_rounds, min_occurrences)
                 
+                # Filtrar se a configuração exigir validação estrita
+                if self._config.detection.validate_brazilian_plate:
+                     # Remove placas que a validação (vote_best_plate já faz internamente) não conseguiu corrigir
+                     # Mas vote_best_plate retorna a placa crua se falhar.
+                     # Vamos revalidar aqui ou confiar no retorno?
+                     from services.plate_validator import validate_plate
+                     results = [r for r in results if validate_plate(r.plate_text)]
+
                 # Filtrar apenas placas que ainda não enviamos nesta mesma sessão
                 new_results = [r for r in results if r.formatted_plate not in self._session_sent_plates]
                 
@@ -340,7 +376,13 @@ def main() -> None:
     storage = ResultStorage(config.storage)
     storage.ensure_directory()
 
-    video = VideoCapture(config.video_source, frame_buffer, roi=roi, debug=config.debug)
+    video = VideoCapture(
+        config.video_source,
+        frame_buffer,
+        roi=roi,
+        debug=config.debug,
+        reconnect_interval=config.detection.rtsp_reconnect_seconds,
+    )
 
     detection_loop = DetectionLoop(
         config=config,
